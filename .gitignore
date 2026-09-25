@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# App Data & Sessions
+data/
+*.session
+*.session-journal
+.env
+errors/
+output/
+incoming/
+temp/
+logs/
+
+# IDE & Agent Cache
+.idea/
+.vscode/
+*.swp
+.agents/
