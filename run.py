@@ -61,9 +61,9 @@ async def main() -> None:
         logger.error("ERROR: BOT_TOKEN is missing! Set it in your .env file.")
         sys.exit(1)
 
-    # If PORT is provided (Render, Koyeb, Fly.io, etc.), run background health server
+    # If PORT is provided or running on Hugging Face Spaces (SPACE_ID), run health server
     health_runner = None
-    port_env = os.getenv("PORT")
+    port_env = os.getenv("PORT") or ("7860" if os.getenv("SPACE_ID") else None)
     if port_env and port_env.isdigit():
         health_runner = await start_health_server(int(port_env))
 

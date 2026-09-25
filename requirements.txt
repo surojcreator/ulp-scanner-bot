@@ -4,3 +4,4 @@ TgCrypto>=1.2.5
 aiofiles>=23.2.1
 python-dotenv>=1.0.1
 pydantic>=2.0.0
+gradio>=4.0.0
