@@ -1,9 +1,13 @@
-"""Main application entry point."""
+"""Main application entry point.
+Supports running as a standalone MTProto/aiogram worker, or with a lightweight
+HTTP health check server for free hosting platforms (Render, Koyeb, Fly.io).
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -19,6 +23,31 @@ from src.config import (
     TELEGRAM_SESSION_NAME,
 )
 
+logger = logging.getLogger("ulp_bot")
+
+
+async def start_health_server(port: int):
+    """Starts a minimal aiohttp HTTP server for cloud platforms requiring an open port."""
+    try:
+        from aiohttp import web
+
+        async def healthz(request):
+            return web.json_response({"status": "ok", "service": "ulp-scanner-bot"})
+
+        app = web.Application()
+        app.router.add_get("/", healthz)
+        app.router.add_get("/healthz", healthz)
+
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+        logger.info(f"Health check HTTP server listening on port {port} (allows Free tier web hosting)")
+        return runner
+    except Exception as e:
+        logger.warning(f"Could not start health check HTTP server: {e}")
+        return None
+
 
 async def main() -> None:
     logging.basicConfig(
@@ -26,12 +55,17 @@ async def main() -> None:
         format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
         handlers=[logging.StreamHandler(sys.stdout)]
     )
-    logger = logging.getLogger("ulp_bot")
     logger.info("Initializing ULP Merger & Error-Checker Bot...")
 
     if not BOT_TOKEN:
         logger.error("ERROR: BOT_TOKEN is missing! Set it in your .env file.")
         sys.exit(1)
+
+    # If PORT is provided (Render, Koyeb, Fly.io, etc.), run background health server
+    health_runner = None
+    port_env = os.getenv("PORT")
+    if port_env and port_env.isdigit():
+        health_runner = await start_health_server(int(port_env))
 
     # If Telethon MTProto credentials are configured, use the high-speed MTProto engine (supports up to 2GB downloads)
     if TELEGRAM_API_ID and TELEGRAM_API_HASH:
@@ -52,6 +86,8 @@ async def main() -> None:
             await client.run_until_disconnected()
         finally:
             await client.disconnect()
+            if health_runner:
+                await health_runner.cleanup()
             logger.info("Telethon bot disconnected.")
         return
 
@@ -71,6 +107,8 @@ async def main() -> None:
         await dp.start_polling(bot)
     finally:
         await bot.session.close()
+        if health_runner:
+            await health_runner.cleanup()
         logger.info("Bot stopped.")
 
 
