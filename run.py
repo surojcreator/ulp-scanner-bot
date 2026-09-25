@@ -10,13 +10,17 @@ from pathlib import Path
 # Add project root to sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from src.bot import create_bot, create_dispatcher
-from src.config import BOT_TOKEN, TELEGRAM_API_SERVER
-from src.downloader import get_telethon_client
+from src.config import (
+    BOT_TOKEN,
+    DATA_DIR,
+    TELEGRAM_API_HASH,
+    TELEGRAM_API_ID,
+    TELEGRAM_API_SERVER,
+    TELEGRAM_SESSION_NAME,
+)
 
 
 async def main() -> None:
-    # Configure logging
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
@@ -26,40 +30,47 @@ async def main() -> None:
     logger.info("Initializing ULP Merger & Error-Checker Bot...")
 
     if not BOT_TOKEN:
-        logger.error(
-            "ERROR: BOT_TOKEN is not configured! "
-            "Please create a .env file with your BOT_TOKEN from @BotFather."
-        )
+        logger.error("ERROR: BOT_TOKEN is missing! Set it in your .env file.")
         sys.exit(1)
 
-    # Initialize bot and dispatcher
+    # If Telethon MTProto credentials are configured, use the high-speed MTProto engine (supports up to 2GB downloads)
+    if TELEGRAM_API_ID and TELEGRAM_API_HASH:
+        logger.info("Running high-performance MTProto Bot Engine (supports >20MB downloads up to 2GB)...")
+        from telethon import TelegramClient
+        from src.tele_bot import setup_telethon_bot
+
+        session_path = str(DATA_DIR / TELEGRAM_SESSION_NAME)
+        client = TelegramClient(session_path, TELEGRAM_API_ID, TELEGRAM_API_HASH)
+        await client.start(bot_token=BOT_TOKEN)
+        setup_telethon_bot(client)
+
+        me = await client.get_me()
+        logger.info(f"Bot connected successfully via MTProto as @{me.username} (ID: {me.id})")
+        logger.info("Listening for forwarded big files and commands. Press Ctrl+C to stop.")
+
+        try:
+            await client.run_until_disconnected()
+        finally:
+            await client.disconnect()
+            logger.info("Telethon bot disconnected.")
+        return
+
+    # Fallback to standard aiogram 3 engine
+    logger.info("Running standard aiogram 3 Bot Engine...")
+    from src.bot import create_bot, create_dispatcher
+
     bot = create_bot()
     dp = create_dispatcher()
 
-    if TELEGRAM_API_SERVER:
-        logger.info(f"Using custom Telegram Bot API Server: {TELEGRAM_API_SERVER}")
-    else:
-        logger.info("Using official Telegram Bot API (api.telegram.org)")
-
-    # Attempt to initialize Telethon MTProto client if configured
-    telethon_client = await get_telethon_client()
-    if telethon_client:
-        logger.info("Telethon MTProto client ready for high-speed >20MB downloads.")
-
-    # Get bot info
     me = await bot.get_me()
     logger.info(f"Bot connected successfully as @{me.username} (ID: {me.id})")
     logger.info("Listening for forwarded files and messages. Press Ctrl+C to stop.")
 
     try:
-        # Delete any pending webhook updates and start long-polling
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     finally:
-        logger.info("Shutting down bot session...")
         await bot.session.close()
-        if telethon_client:
-            await telethon_client.disconnect()
         logger.info("Bot stopped.")
 
 
