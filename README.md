@@ -1,3 +1,13 @@
+---
+title: ULP Scanner Bot
+emoji: ⚡
+colorFrom: blue
+colorTo: indigo
+sdk: gradio
+app_file: app.py
+pinned: false
+---
+
 # ULP Merger & Error-Checker Telegram Bot
 
 A production-grade Telegram bot built from scratch following the **`skill-tg`** playbook (**aiogram 3** + **Telethon MTProto**), designed to store forwarded dumps, merge them, deduplicate lines, purge server storage, and inspect records for syntax/formatting errors.
