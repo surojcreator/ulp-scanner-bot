@@ -1,4 +1,6 @@
-"""Configuration and environment variables loader."""
+"""Configuration and environment variables loader.
+Adheres to skill-tg guidelines.
+"""
 
 from __future__ import annotations
 
@@ -15,8 +17,9 @@ load_dotenv(BASE_DIR / ".env")
 # Telegram Bot configuration
 BOT_TOKEN: str = os.getenv("BOT_TOKEN", "").strip()
 TELEGRAM_API_SERVER: str | None = os.getenv("TELEGRAM_API_SERVER", "").strip() or None
+PREMIUM_EMOJI: bool = os.getenv("PREMIUM_EMOJI", "off").lower() in ("on", "true", "1")
 
-# Optional Telethon MTProto client for downloading up to 2GB files
+# Telethon MTProto Client configuration (enables >20MB downloads up to 2GB)
 TELEGRAM_API_ID_RAW = os.getenv("TELEGRAM_API_ID", "").strip()
 TELEGRAM_API_ID: int | None = int(TELEGRAM_API_ID_RAW) if TELEGRAM_API_ID_RAW.isdigit() else None
 TELEGRAM_API_HASH: str | None = os.getenv("TELEGRAM_API_HASH", "").strip() or None

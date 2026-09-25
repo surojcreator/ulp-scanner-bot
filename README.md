@@ -1,89 +1,92 @@
 # ULP Merger & Error-Checker Telegram Bot
 
-A high-performance Telegram bot built with **aiogram 3** (and optional **Telethon MTProto**) that stores forwarded combo files, merges them, deduplicates lines, deletes the original files to save server disk space, and validates the `url:user:password` format for errors.
+A production-grade Telegram bot built from scratch following the **`skill-tg`** playbook (**aiogram 3** + **Telethon MTProto**), designed to store forwarded dumps, merge them, deduplicate lines, purge server storage, and inspect records for syntax/formatting errors.
 
 ---
 
-## ⚡ Key Features
+## ⚡ Architecture & `skill-tg` Design Standards
 
-1. **File Storage & Batch Queue:**
-   - Forward or upload multiple files (`.txt`, `.csv`, `.log`, or `.zip`).
-   - Stores incoming files persistently per chat/user in `data/incoming/<chat_id>/`.
-   - Real-time queue summary: file count, total size, file names.
+This bot strictly adheres to the **`skill-tg`** production specifications:
 
-2. **Streaming Merge & Fast Deduplication:**
-   - Reads lines across all files in the batch without loading the entire dump into RAM.
-   - 64-bit fingerprint hash set for high-speed single-pass deduplication.
-   - Extracts and processes text files nested inside `.zip` archives automatically.
+1. **Screen Design Bar:**
+   - `<icon> <b>Title</b>` layout with a single leading emoji icon per section.
+   - Text hierarchy: **Only titles and key figures are bolded** (`<b>`).
+   - Long lists, error summaries, and syntax details are nested in `<blockquote expandable>`.
+   - Emoji are used as consistent conceptual icons, not decorative confetti.
 
-3. **Disk Space Auto-Cleanup:**
-   - Once the merged & deduplicated file is written, the bot immediately deletes the original forwarded files from the server disk.
+2. **Strict `render()` Pipeline & HTML Escaping:**
+   - Centralized trusted HTML templates in `src/texts.py`.
+   - The `render()` function escapes **only dynamic interpolated values**, ensuring tags like `<b>`, `<code>`, and `<blockquote>` are rendered properly by Telegram rather than escaped to literal `&lt;b&gt;`.
 
-4. **Detailed `url:user:password` Error Checking:**
-   - Verifies each unique record against the `url:user:password` schema:
-     - Handles schemes (`http://`, `https://`, `ftp://`), URLs with custom ports (`:8080`), and passwords containing colons.
-     - Supports alternative delimiters: `:` (colon), `|` (pipe), `;` (semicolon), or `\t` (tab).
-     - Flags invalid URLs, missing usernames, empty passwords, null/binary corruption, or missing fields.
-   - Produces two clean outputs:
-     - `cleaned_ulp_<timestamp>.txt`: All valid records normalized to `url:user:password`.
-     - `errors_ulp_<timestamp>.txt`: Every line that failed with line number and specific error reason.
+3. **Bot API 9.4 Button Factory & UX Hierarchy:**
+   - `cb(text, data, style, icon)` factory in `src/keyboards.py`.
+   - **At most one `success` button per screen** (the primary eye target); pure list/menu screens feature 0 `success` buttons.
+   - `danger` reserved for destructive actions (e.g., clear queue).
+   - Navigation (`🔙 Back` / `🏠 Home`) placed predictably in the last row.
 
-5. **Large File Support (up to 2GB):**
-   - Standard Bot API public server caps downloads at 20MB.
-   - To handle big files:
-     - **Option A (Self-hosted Bot API):** Set `TELEGRAM_API_SERVER=http://localhost:8081` in `.env` (2GB upload / unlimited download).
-     - **Option B (Telethon MTProto):** Set `TELEGRAM_API_ID` & `TELEGRAM_API_HASH` in `.env` to download forwarded files up to 2GB directly through MTProto.
+4. **Multi-Gigabyte File Support (up to 2 GB):**
+   - Public HTTP Bot API caps downloads at 20MB.
+   - Using native **Telethon MTProto transport** (`src/tele_bot.py`) with `TgCrypto`, the bot connects directly to Telegram DC servers over MTProto on port 443, enabling downloads and uploads of files up to **2 GB**.
+
+5. **2-Tier Streaming Merge & Deduplication:**
+   - Memory-bounded streaming deduplicator utilizing a 64-bit fingerprint hash set (`blake2b` 8-byte digest).
+   - Auto-extracts `.txt` files contained inside `.zip` archives.
+   - Deletes original uploaded source files immediately upon completion to maintain clean server storage.
 
 ---
 
-## 🚀 Setup & Installation
+## 📂 Project Structure
 
-### 1. Requirements
-Ensure Python 3.10+ is installed. All dependencies are in `requirements.txt`:
-```bash
-pip install -r requirements.txt
+```
+ulp-scanner-bot/
+├── .env.example                     # Environment configuration blueprint
+├── .gitignore                       # Git exclusions (protects .env & data/)
+├── Dockerfile                       # Python 3.10-slim container for cloud deploy
+├── render.yaml                      # Render Blueprint specification
+├── requirements.txt                 # Dependencies: aiogram 3, Telethon, TgCrypto
+├── run.py                           # App entry point (auto-boots MTProto/aiogram)
+├── src/
+│   ├── config.py                    # Environment settings & directory initialization
+│   ├── emoji_map.py                 # Bot API 9.4 custom emoji handler
+│   ├── texts.py                     # Centralized HTML templates (Screen design bar)
+│   ├── keyboards.py                 # Button factory & UX row/color composition
+│   ├── storage.py                   # Per-chat persistent queue & disk space cleanup
+│   ├── validator.py                 # Robust url:user:password syntax checking
+│   ├── processor.py                 # Streaming merger, deduplicator, and error logger
+│   ├── downloader.py                # Dual Bot API / MTProto file retriever
+│   ├── bot.py                       # aiogram 3 router and handlers
+│   └── tele_bot.py                  # High-speed MTProto bot for 2GB big file handling
+└── tests/
+    ├── test_skill_tg_compliance.py  # Self-verification of render() & UX standards
+    ├── test_validator.py            # Line parsing, ports, colon passwords, error codes
+    └── test_processor.py            # End-to-end multi-batch merge, deduplication & deletion
 ```
 
-### 2. Configuration (`.env`)
-Create a `.env` file from `.env.example`:
-```env
-# Required: Telegram Bot token from @BotFather
-BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrSTUvwxYZ
-
-# (Optional) Local Bot API Server for >20MB files
-# TELEGRAM_API_SERVER=http://localhost:8081
-
-# (Optional) Telethon MTProto Client for >20MB downloads without local server
-# TELEGRAM_API_ID=1234567
-# TELEGRAM_API_HASH=abcdef0123456789abcdef0123456789
-```
-
-### 3. Run the Bot
-```bash
-python run.py
-```
-
 ---
 
-## 📱 Bot Commands
+## 🧪 Self-Verification & Quality Checks
 
-| Command | Description |
-|---|---|
-| `/start` | Welcome screen and quick instructions |
-| `/files` or `/queue` | View stored files currently queued in storage |
-| `/merge` or `/clean` | Run the merge, deduplicate, delete sources, and check errors pipeline |
-| `/clear` | Delete all queued files from the server |
-| `/help` | Detailed syntax and delimiter guidance |
-
----
-
-## 🧪 Testing
-
-Run unit and integration tests:
+Run the complete test suite:
 ```bash
+python tests/test_skill_tg_compliance.py
 python tests/test_validator.py
 python tests/test_processor.py
 ```
-Both test suites verify:
-- Line parsing with edge-cases (ports, passwords with colons, different delimiters).
-- End-to-end merging, deduplication, deletion of source files, error detection, and report generation.
+
+- **`test_skill_tg_compliance.py`**: Verifies `render()` never escapes template tags, ensures at most one `success` button per view, and checks navigation button placement.
+- **`test_validator.py`**: Verifies delimiter flexibility (`:`, `|`, `;`, `\t`), URL with ports (`http://1.2.3.4:8080`), passwords with colons, and flags invalid syntax.
+- **`test_processor.py`**: Verifies full pipeline: batch merging, deduplicating lines, **deleting source files from server disk**, and generating clean/error files.
+
+---
+
+## 🚀 Deployment
+
+The repository is synchronized with GitHub:
+**Repository:** [https://github.com/surojcreator/ulp-scanner-bot](https://github.com/surojcreator/ulp-scanner-bot)
+
+To run locally:
+```bash
+python run.py
+```
+To run on Render:
+Deploy as a **Background Worker** using `Dockerfile` or the provided `render.yaml`.

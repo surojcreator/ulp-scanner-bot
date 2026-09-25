@@ -1,13 +1,12 @@
 """Telethon-based MTProto Bot implementation.
-Supports handling and downloading files of ANY size up to 2GB (bypassing HTTP Bot API 20MB limit).
+Fully aligned with skill-tg screen design bar and UX principles.
+Handles files of ANY size up to 2GB directly through Telegram MTProto.
 """
 
 from __future__ import annotations
 
-import asyncio
 import html
 import logging
-import os
 import time
 import uuid
 from pathlib import Path
@@ -16,13 +15,9 @@ from typing import Dict, List, Optional
 from telethon import Button, TelegramClient, events
 from telethon.tl.types import DocumentAttributeFilename
 
-from src.config import (
-    BOT_TOKEN,
-    DATA_DIR,
-    TELEGRAM_API_HASH,
-    TELEGRAM_API_ID,
-    TELEGRAM_SESSION_NAME,
-)
+import src.config as config
+import src.texts as texts
+from src.emoji_map import premiumize
 from src.processor import ProcessingReport, processor
 from src.storage import QueuedFile, storage_manager
 
@@ -30,6 +25,13 @@ logger = logging.getLogger(__name__)
 
 # Cache last processing report per chat for on-demand downloads
 _last_reports: Dict[int, ProcessingReport] = {}
+
+
+def render_html(template: str, **values) -> str:
+    """Renders trusted HTML template, escaping only dynamic interpolated values."""
+    safe_values = {key: html.escape(str(val)) for key, val in values.items()}
+    formatted = template.format(**safe_values)
+    return premiumize(formatted, config.PREMIUM_EMOJI)
 
 
 def get_filename_from_document(doc) -> str:
@@ -51,49 +53,69 @@ def _format_bytes(size_bytes: int) -> str:
     return f"{size:.2f} TB"
 
 
-def get_queue_keyboard(count: int):
-    """Builds inline keyboard for queue management."""
-    buttons = []
+# ---------------------------------------------------------------------------
+# KEYBOARDS (skill-tg compliant row/color composition)
+# ---------------------------------------------------------------------------
+
+def get_tele_queue_keyboard(count: int):
+    """Queue keyboard conforming to skill-tg UX rules:
+    - At most 1 'success' button (only when count > 0).
+    - Secondary actions (2 per row).
+    - Consistent nav.
+    """
+    rows = []
     if count > 0:
-        buttons.append([
-            Button.inline(f"⚡ Merge & Clean Queue ({count} files)", b"action_merge")
-        ])
-        buttons.append([
-            Button.inline("📋 View Queue List", b"action_list"),
+        rows.append([Button.inline(f"⚡ Merge & Clean Queue ({count})", b"action_merge")])
+        rows.append([
+            Button.inline("📋 View Queue", b"action_list"),
             Button.inline("🗑 Clear Queue", b"action_clear")
         ])
     else:
-        buttons.append([
-            Button.inline("📥 Forward / Send Files", b"action_help")
-        ])
-    return buttons
+        rows.append([Button.inline("ℹ️ How it Works", b"action_help")])
+    return rows
 
 
-def get_done_keyboard(has_clean: bool, has_errors: bool):
-    """Builds inline keyboard after processing."""
-    row = []
-    if has_clean:
-        row.append(Button.inline("📥 Download Clean ULP", b"download_clean"))
-    if has_errors:
-        row.append(Button.inline("⚠️ Download Errors Log", b"download_errors"))
-    buttons = []
-    if row:
-        buttons.append(row)
-    buttons.append([
-        Button.inline("➕ Process More Files", b"action_help"),
-        Button.inline("📋 View Queue", b"action_list")
-    ])
-    return buttons
+def get_tele_queue_list_keyboard():
+    return [
+        [Button.inline("⚡ Run Merge Pipeline", b"action_merge")],
+        [Button.inline("🗑 Clear Queue", b"action_clear")],
+        [Button.inline("🔙 Back to Home", b"action_home")]
+    ]
 
 
-def get_confirm_clear_keyboard():
+def get_tele_confirm_clear_keyboard():
     return [
         [
-            Button.inline("✅ Yes, Delete All", b"confirm_clear"),
+            Button.inline("🗑 Yes, Delete All", b"confirm_clear"),
             Button.inline("❌ Cancel", b"cancel_clear")
         ]
     ]
 
+
+def get_tele_report_keyboard(has_clean: bool, has_errors: bool):
+    rows = []
+    download_row = []
+    if has_clean:
+        download_row.append(Button.inline("📥 Download Clean ULP", b"download_clean"))
+    if has_errors:
+        download_row.append(Button.inline("⚠️ Download Errors Log", b"download_errors"))
+    if download_row:
+        rows.append(download_row)
+
+    rows.append([
+        Button.inline("📋 Check Queue", b"action_list"),
+        Button.inline("🏠 Home", b"action_home")
+    ])
+    return rows
+
+
+def get_tele_back_keyboard():
+    return [[Button.inline("🔙 Back to Home", b"action_home")]]
+
+
+# ---------------------------------------------------------------------------
+# TELETHON BOT LOGIC
+# ---------------------------------------------------------------------------
 
 def setup_telethon_bot(client: TelegramClient) -> None:
     """Registers all event handlers on the Telethon client."""
@@ -101,31 +123,14 @@ def setup_telethon_bot(client: TelegramClient) -> None:
     @client.on(events.NewMessage(pattern=r"^/start$"))
     async def on_start(event):
         chat_id = event.chat_id
-        count, _, _ = storage_manager.get_queue_stats(chat_id)
-        text = (
-            "👋 **Welcome to the ULP Merger & Cleaner Bot!**\n\n"
-            "I can store your forwarded files and process big `url:user:password` dumps:\n"
-            "1. 📥 **Store files:** Forward or upload any text/zip dumps (supports **big files up to 2GB**).\n"
-            "2. ⚡ **Merge & Deduplicate:** Merges all queued files and removes duplicate lines.\n"
-            "3. 🗑 **Clean Server Disk:** Deletes original files immediately to keep disk space clean.\n"
-            "4. 🔍 **Error Checking:** Validates every record for correct `url:user:password` format and flags errors.\n\n"
-            "👉 _Simply forward or drag-and-drop your files here to begin!_"
-        )
-        await event.respond(text, buttons=get_queue_keyboard(count))
+        count, _, human_size = storage_manager.get_queue_stats(chat_id)
+        text = render_html(texts.START_TEXT, count=count, size=human_size)
+        await event.respond(text, buttons=get_tele_queue_keyboard(count), parse_mode="html")
 
     @client.on(events.NewMessage(pattern=r"^/help$"))
     async def on_help(event):
-        text = (
-            "📖 **How to use ULP Cleaner Bot:**\n\n"
-            "• **Forward files:** Send or forward `.txt`, `.csv`, `.log`, or `.zip` files.\n"
-            "• **/files:** View all files currently stored in your processing queue.\n"
-            "• **/merge:** Merge all queued files, remove duplicates, delete original files, and validate.\n"
-            "• **/clear:** Delete all queued files from the server without processing.\n\n"
-            "**Format checked:** `url:user:password`\n"
-            "• Supports colon (`:`), pipe (`|`), semicolon (`;`), or tab (`\\t`).\n"
-            "• Handles URLs with ports (e.g. `http://site.com:8080`) and complex passwords containing colons."
-        )
-        await event.respond(text)
+        text = render_html(texts.HELP_TEXT)
+        await event.respond(text, buttons=get_tele_back_keyboard(), parse_mode="html")
 
     @client.on(events.NewMessage(pattern=r"^/(files|queue)$"))
     async def on_files(event):
@@ -135,36 +140,44 @@ def setup_telethon_bot(client: TelegramClient) -> None:
 
         if not files:
             await event.respond(
-                "📭 **Your queue is empty.**\nForward or send files here to add them to storage.",
-                buttons=get_queue_keyboard(0)
+                render_html(texts.QUEUE_EMPTY_TEXT),
+                buttons=get_tele_queue_keyboard(0),
+                parse_mode="html"
             )
             return
 
-        file_lines = []
-        for idx, f in enumerate(files[:15], 1):
-            file_lines.append(f"{idx}. 📄 **{f.original_name}** ({f.human_size})")
-
-        if len(files) > 15:
-            file_lines.append(f"_...and {len(files) - 15} more files_")
-
-        text = (
-            f"📋 **Stored Files in Queue ({count} files, {human_size}):**\n\n"
-            + "\n".join(file_lines)
-            + "\n\n_Click below to merge, deduplicate, and check for errors._"
+        file_items = "\n".join(
+            f"• 📄 <b>{html.escape(f.original_name)}</b> (<code>{f.human_size}</code>)"
+            for f in files[:20]
         )
-        await event.respond(text, buttons=get_queue_keyboard(count))
+        if len(files) > 20:
+            file_items += f"\n<i>...and {len(files) - 20} more files</i>"
+
+        text = texts.QUEUE_LIST_TEXT.format(
+            count=html.escape(str(count)),
+            total_size=html.escape(human_size),
+            file_items=file_items
+        )
+        await event.respond(
+            premiumize(text, config.PREMIUM_EMOJI),
+            buttons=get_tele_queue_list_keyboard(),
+            parse_mode="html"
+        )
 
     @client.on(events.NewMessage(pattern=r"^/clear$"))
     async def on_clear(event):
         chat_id = event.chat_id
         count, _, human_size = storage_manager.get_queue_stats(chat_id)
         if count == 0:
-            await event.respond("📭 Queue is already empty.")
+            await event.respond(
+                render_html(texts.QUEUE_EMPTY_TEXT),
+                buttons=get_tele_queue_keyboard(0),
+                parse_mode="html"
+            )
             return
-        await event.respond(
-            f"⚠️ Are you sure you want to delete all **{count} files** ({human_size}) from the server?",
-            buttons=get_confirm_clear_keyboard()
-        )
+
+        text = render_html(texts.CONFIRM_CLEAR_TEXT, count=count, total_size=human_size)
+        await event.respond(text, buttons=get_tele_confirm_clear_keyboard(), parse_mode="html")
 
     @client.on(events.NewMessage(func=lambda e: bool(e.document)))
     async def on_document(event):
@@ -173,7 +186,7 @@ def setup_telethon_bot(client: TelegramClient) -> None:
         raw_filename = get_filename_from_document(doc)
         file_size = doc.size or 0
 
-        status_msg = await event.reply("⏳ _Receiving and downloading file via MTProto..._")
+        status_msg = await event.reply("⏳ <i>Receiving and downloading file via MTProto...</i>", parse_mode="html")
 
         try:
             safe_uuid = uuid.uuid4().hex[:8]
@@ -193,7 +206,8 @@ def setup_telethon_bot(client: TelegramClient) -> None:
                     pct = (current / total) * 100 if total > 0 else 0
                     try:
                         await status_msg.edit(
-                            f"⏳ _Downloading {raw_filename}: {pct:.1f}% ({_format_bytes(current)} / {_format_bytes(total)})_"
+                            f"⏳ <i>Downloading {html.escape(raw_filename)}: <b>{pct:.1f}%</b> ({_format_bytes(current)} / {_format_bytes(total)})</i>",
+                            parse_mode="html"
                         )
                     except Exception:
                         pass
@@ -214,18 +228,19 @@ def setup_telethon_bot(client: TelegramClient) -> None:
 
             total_count, _, total_human_size = storage_manager.get_queue_stats(chat_id)
 
-            reply_text = (
-                f"✅ **File Stored in Queue!**\n\n"
-                f"📄 **File:** `{raw_filename}`\n"
-                f"📦 **Size:** `{_format_bytes(actual_size)}`\n\n"
-                f"📊 **Total Queue:** {total_count} file(s) ({total_human_size})\n\n"
-                f"_Forward more files or click **Merge & Clean** below!_"
+            reply_text = render_html(
+                texts.FILE_STORED_TEXT,
+                filename=raw_filename,
+                size=_format_bytes(actual_size),
+                count=total_count,
+                total_size=total_human_size
             )
-            await status_msg.edit(reply_text, buttons=get_queue_keyboard(total_count))
+            await status_msg.edit(reply_text, buttons=get_tele_queue_keyboard(total_count), parse_mode="html")
 
         except Exception as e:
-            logger.error(f"Error downloading document: {e}", exc_info=True)
-            await status_msg.edit(f"❌ **Failed to download file:**\n`{str(e)}`")
+            logger.error(f"Error downloading document via MTProto: {e}", exc_info=True)
+            err_text = render_html(texts.ERROR_TEXT, error_message=str(e))
+            await status_msg.edit(err_text, buttons=get_tele_back_keyboard(), parse_mode="html")
 
     @client.on(events.NewMessage(pattern=r"^/(merge|clean)$"))
     async def on_merge_command(event):
@@ -239,71 +254,92 @@ def setup_telethon_bot(client: TelegramClient) -> None:
     async def run_merge_pipeline(chat_id: int, event):
         files = storage_manager.get_queued_files(chat_id)
         if not files:
-            text = "📭 **No files in queue to merge!**\nPlease forward or send some files first."
+            text = render_html(texts.QUEUE_EMPTY_TEXT)
             if isinstance(event, events.CallbackQuery.Event):
-                await event.edit(text, buttons=get_queue_keyboard(0))
+                await event.edit(text, buttons=get_tele_queue_keyboard(0), parse_mode="html")
             else:
-                await event.respond(text, buttons=get_queue_keyboard(0))
+                await event.respond(text, buttons=get_tele_queue_keyboard(0), parse_mode="html")
             return
 
-        progress_msg = await event.respond("🚀 _Starting merge and deduplication pipeline..._")
+        progress_msg = await event.respond(render_html(texts.PROCESS_START_TEXT), parse_mode="html")
 
         try:
-            await progress_msg.edit("🔄 _Step 1/3: Merging files and deduplicating lines..._")
+            await progress_msg.edit(render_html(texts.PROCESS_MERGING_TEXT), parse_mode="html")
 
+            # Execute pipeline
             report = processor.process(chat_id, files)
             _last_reports[chat_id] = report
 
-            error_summary_lines = []
             if report.error_breakdown:
-                error_summary_lines.append("\n**Top Errors Detected:**")
-                for err_code, count in sorted(report.error_breakdown.items(), key=lambda x: x[1], reverse=True)[:5]:
-                    error_summary_lines.append(f"  • `{err_code}`: **{count:,}** lines")
+                breakdown_lines = [
+                    f"• <code>{html.escape(code)}</code>: <b>{count:,}</b> lines"
+                    for code, count in sorted(report.error_breakdown.items(), key=lambda x: x[1], reverse=True)
+                ]
+                breakdown_str = "\n".join(breakdown_lines)
+            else:
+                breakdown_str = "<i>No syntax errors detected!</i>"
 
-            report_text = (
-                "🎉 **Merge & Error-Check Complete!**\n\n"
-                f"📁 **Source Files Merged:** {report.total_files}\n"
-                f"🗑 **Original Files Deleted:** {report.source_files_deleted} (Disk space freed!)\n"
-                f"📄 **Total Raw Lines:** {report.total_raw_lines:,}\n"
-                f"✨ **Unique Lines:** {report.unique_lines:,} "
-                f"(📉 **{report.duplicates_dropped:,}** duplicates removed)\n"
-                f"✅ **Valid ULP Records:** **{report.valid_lines:,}**\n"
-                f"⚠️ **Syntax/Format Errors:** **{report.error_lines:,}**\n"
-                f"⏱ **Processing Time:** {report.duration_seconds:.2f}s\n"
-                + "\n".join(error_summary_lines)
+            report_markup = texts.PROCESS_REPORT_TEXT.format(
+                total_files=html.escape(str(report.total_files)),
+                deleted_files=html.escape(str(report.source_files_deleted)),
+                raw_lines=html.escape(f"{report.total_raw_lines:,}"),
+                unique_lines=html.escape(f"{report.unique_lines:,}"),
+                duplicates_dropped=html.escape(f"{report.duplicates_dropped:,}"),
+                valid_lines=html.escape(f"{report.valid_lines:,}"),
+                error_lines=html.escape(f"{report.error_lines:,}"),
+                duration=html.escape(f"{report.duration_seconds:.2f}"),
+                error_breakdown=breakdown_str
             )
 
             has_clean = report.clean_file_path is not None and report.clean_file_path.exists()
             has_errors = report.error_file_path is not None and report.error_file_path.exists()
 
             await progress_msg.edit(
-                report_text,
-                buttons=get_done_keyboard(has_clean, has_errors)
+                premiumize(report_markup, config.PREMIUM_EMOJI),
+                buttons=get_tele_report_keyboard(has_clean, has_errors),
+                parse_mode="html"
             )
 
-            # Send clean file if exists (Telethon can send files up to 2GB!)
+            # Upload clean file (Telethon supports sending files up to 2GB!)
             if has_clean:
-                await progress_msg.edit(
-                    report_text + "\n\n_Uploading cleaned file..._",
-                    buttons=get_done_keyboard(has_clean, has_errors)
-                )
                 await client.send_file(
                     chat_id,
                     file=str(report.clean_file_path),
-                    caption=f"✅ **Cleaned ULP File** ({report.valid_lines:,} lines, {report.human_clean_size})"
+                    caption=f"✅ <b>Cleaned ULP File</b> ({report.valid_lines:,} lines, {report.human_clean_size})",
+                    parse_mode="html"
                 )
 
-            # Send errors log if errors occurred
+            # Upload errors log if errors occurred
             if has_errors:
                 await client.send_file(
                     chat_id,
                     file=str(report.error_file_path),
-                    caption=f"⚠️ **Errors Log** ({report.error_lines:,} lines that failed validation, {report.human_error_size})"
+                    caption=f"⚠️ <b>Errors Log</b> ({report.error_lines:,} invalid lines, {report.human_error_size})",
+                    parse_mode="html"
                 )
 
         except Exception as e:
-            logger.error(f"Error in pipeline: {e}", exc_info=True)
-            await progress_msg.edit(f"❌ **Processing error:**\n`{str(e)}`")
+            logger.error(f"Error in merge pipeline: {e}", exc_info=True)
+            err_text = render_html(texts.ERROR_TEXT, error_message=str(e))
+            await progress_msg.edit(err_text, buttons=get_tele_back_keyboard(), parse_mode="html")
+
+    # -----------------------------------------------------------------------
+    # NAVIGATION CALLBACKS
+    # -----------------------------------------------------------------------
+
+    @client.on(events.CallbackQuery(data=b"action_home"))
+    async def on_callback_home(event):
+        chat_id = event.chat_id
+        await event.answer()
+        count, _, human_size = storage_manager.get_queue_stats(chat_id)
+        text = render_html(texts.START_TEXT, count=count, size=human_size)
+        await event.edit(text, buttons=get_tele_queue_keyboard(count), parse_mode="html")
+
+    @client.on(events.CallbackQuery(data=b"action_help"))
+    async def on_callback_help(event):
+        await event.answer()
+        text = render_html(texts.HELP_TEXT)
+        await event.edit(text, buttons=get_tele_back_keyboard(), parse_mode="html")
 
     @client.on(events.CallbackQuery(data=b"action_list"))
     async def on_callback_list(event):
@@ -313,18 +349,30 @@ def setup_telethon_bot(client: TelegramClient) -> None:
         count, _, human_size = storage_manager.get_queue_stats(chat_id)
 
         if not files:
-            await event.edit("📭 **Queue is empty.**", buttons=get_queue_keyboard(0))
+            await event.edit(
+                render_html(texts.QUEUE_EMPTY_TEXT),
+                buttons=get_tele_queue_keyboard(0),
+                parse_mode="html"
+            )
             return
 
-        file_lines = []
-        for idx, f in enumerate(files[:15], 1):
-            file_lines.append(f"{idx}. 📄 **{f.original_name}** ({f.human_size})")
-
-        text = (
-            f"📋 **Stored Files in Queue ({count} files, {human_size}):**\n\n"
-            + "\n".join(file_lines)
+        file_items = "\n".join(
+            f"• 📄 <b>{html.escape(f.original_name)}</b> (<code>{f.human_size}</code>)"
+            for f in files[:20]
         )
-        await event.edit(text, buttons=get_queue_keyboard(count))
+        if len(files) > 20:
+            file_items += f"\n<i>...and {len(files) - 20} more files</i>"
+
+        text = texts.QUEUE_LIST_TEXT.format(
+            count=html.escape(str(count)),
+            total_size=html.escape(human_size),
+            file_items=file_items
+        )
+        await event.edit(
+            premiumize(text, config.PREMIUM_EMOJI),
+            buttons=get_tele_queue_list_keyboard(),
+            parse_mode="html"
+        )
 
     @client.on(events.CallbackQuery(data=b"action_clear"))
     async def on_callback_clear(event):
@@ -332,40 +380,30 @@ def setup_telethon_bot(client: TelegramClient) -> None:
         count, _, human_size = storage_manager.get_queue_stats(chat_id)
         await event.answer()
         if count == 0:
-            await event.edit("📭 Queue is already empty.", buttons=get_queue_keyboard(0))
+            await event.edit(
+                render_html(texts.QUEUE_EMPTY_TEXT),
+                buttons=get_tele_queue_keyboard(0),
+                parse_mode="html"
+            )
             return
-        await event.edit(
-            f"⚠️ **Delete all {count} files ({human_size}) from the queue and server?**",
-            buttons=get_confirm_clear_keyboard()
-        )
+        text = render_html(texts.CONFIRM_CLEAR_TEXT, count=count, total_size=human_size)
+        await event.edit(text, buttons=get_tele_confirm_clear_keyboard(), parse_mode="html")
 
     @client.on(events.CallbackQuery(data=b"confirm_clear"))
     async def on_callback_confirm_clear(event):
         chat_id = event.chat_id
         deleted = storage_manager.clear_queue(chat_id)
         await event.answer(f"Deleted {deleted} files.")
-        await event.edit(
-            "🗑 **Queue cleared and source files deleted from server.**",
-            buttons=get_queue_keyboard(0)
-        )
+        text = render_html(texts.QUEUE_CLEARED_TEXT)
+        await event.edit(text, buttons=get_tele_queue_keyboard(0), parse_mode="html")
 
     @client.on(events.CallbackQuery(data=b"cancel_clear"))
     async def on_callback_cancel_clear(event):
         chat_id = event.chat_id
-        count, _, _ = storage_manager.get_queue_stats(chat_id)
         await event.answer("Cancelled.")
-        await event.edit(
-            "Action cancelled. Files remain safely in queue.",
-            buttons=get_queue_keyboard(count)
-        )
-
-    @client.on(events.CallbackQuery(data=b"action_help"))
-    async def on_callback_help(event):
-        await event.answer()
-        await event.respond(
-            "Forward or upload any `.txt` or `.zip` files directly to this chat.\n"
-            "Even big files up to 2GB are downloaded at high speed via MTProto!"
-        )
+        count, _, human_size = storage_manager.get_queue_stats(chat_id)
+        text = render_html(texts.START_TEXT, count=count, size=human_size)
+        await event.edit(text, buttons=get_tele_queue_keyboard(count), parse_mode="html")
 
     @client.on(events.CallbackQuery(data=b"download_clean"))
     async def on_callback_download_clean(event):
@@ -375,7 +413,12 @@ def setup_telethon_bot(client: TelegramClient) -> None:
             await event.answer("Clean file not available.", alert=True)
             return
         await event.answer("Sending clean file...")
-        await client.send_file(chat_id, file=str(report.clean_file_path), caption="✅ **Cleaned ULP File**")
+        await client.send_file(
+            chat_id,
+            file=str(report.clean_file_path),
+            caption=f"✅ <b>Cleaned ULP File</b> ({report.valid_lines:,} lines, {report.human_clean_size})",
+            parse_mode="html"
+        )
 
     @client.on(events.CallbackQuery(data=b"download_errors"))
     async def on_callback_download_errors(event):
@@ -385,4 +428,9 @@ def setup_telethon_bot(client: TelegramClient) -> None:
             await event.answer("Errors file not available.", alert=True)
             return
         await event.answer("Sending errors file...")
-        await client.send_file(chat_id, file=str(report.error_file_path), caption="⚠️ **Errors Log**")
+        await client.send_file(
+            chat_id,
+            file=str(report.error_file_path),
+            caption=f"⚠️ <b>Errors Log</b> ({report.error_lines:,} invalid lines, {report.human_error_size})",
+            parse_mode="html"
+        )
