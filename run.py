@@ -61,10 +61,11 @@ async def main() -> None:
         logger.error("ERROR: BOT_TOKEN is missing! Set it in your .env file.")
         sys.exit(1)
 
-    # If PORT is provided or running on Hugging Face Spaces (SPACE_ID), run health server
+    # If PORT is provided and NOT running under Hugging Face Spaces (where Gradio binds to 7860),
+    # start a lightweight health server for cloud platforms (Render, Koyeb, etc.)
     health_runner = None
-    port_env = os.getenv("PORT") or ("7860" if os.getenv("SPACE_ID") else None)
-    if port_env and port_env.isdigit():
+    port_env = os.getenv("PORT")
+    if port_env and port_env.isdigit() and not os.getenv("SPACE_ID"):
         health_runner = await start_health_server(int(port_env))
 
     # If Telethon MTProto credentials are configured, use the high-speed MTProto engine (supports up to 2GB downloads)
