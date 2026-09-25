@@ -18,6 +18,7 @@ from telethon.tl.types import DocumentAttributeFilename
 import src.config as config
 import src.texts as texts
 from src.emoji_map import premiumize
+from src.fast_telethon import fast_download_file, fast_upload_file
 from src.processor import ProcessingReport, processor
 from src.storage import QueuedFile, storage_manager
 
@@ -51,6 +52,37 @@ def _format_bytes(size_bytes: int) -> str:
             return f"{size:.2f} {unit}"
         size /= 1024.0
     return f"{size:.2f} TB"
+
+
+async def send_file_fast(
+    client: TelegramClient,
+    chat_id: int,
+    file_path: Path,
+    caption: str,
+    progress_callback=None
+):
+    """Sends file using multi-connection fast upload for large files, with fallback to standard."""
+    file_path = Path(file_path)
+    file_size = file_path.stat().st_size if file_path.exists() else 0
+    if file_size > 2 * 1024 * 1024:  # > 2MB
+        try:
+            uploaded = await fast_upload_file(client, file_path, progress_callback=progress_callback)
+            return await client.send_file(
+                chat_id,
+                file=uploaded,
+                caption=caption,
+                parse_mode="html",
+                attributes=[DocumentAttributeFilename(file_name=file_path.name)]
+            )
+        except Exception as e:
+            logger.warning(f"Fast parallel upload failed, falling back to standard send_file: {e}")
+
+    return await client.send_file(
+        chat_id,
+        file=str(file_path),
+        caption=caption,
+        parse_mode="html"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +218,7 @@ def setup_telethon_bot(client: TelegramClient) -> None:
         raw_filename = get_filename_from_document(doc)
         file_size = doc.size or 0
 
-        status_msg = await event.reply("⏳ <i>Receiving and downloading file via MTProto...</i>", parse_mode="html")
+        status_msg = await event.reply("⚡ <i>Accelerating MTProto multi-stream download...</i>", parse_mode="html")
 
         try:
             safe_uuid = uuid.uuid4().hex[:8]
@@ -198,22 +230,41 @@ def setup_telethon_bot(client: TelegramClient) -> None:
             dest_path = chat_dir / dest_filename
 
             last_edit = [time.time()]
+            start_time = time.time()
 
             async def _progress(current, total):
                 now = time.time()
-                if now - last_edit[0] >= 2.0:
+                if now - last_edit[0] >= 1.5:
                     last_edit[0] = now
                     pct = (current / total) * 100 if total > 0 else 0
+                    elapsed = max(0.1, now - start_time)
+                    speed_bps = current / elapsed
+                    speed_str = f"{_format_bytes(int(speed_bps))}/s"
                     try:
                         await status_msg.edit(
-                            f"⏳ <i>Downloading {html.escape(raw_filename)}: <b>{pct:.1f}%</b> ({_format_bytes(current)} / {_format_bytes(total)})</i>",
+                            f"⚡ <i>Turbo Downloading {html.escape(raw_filename)}: <b>{pct:.1f}%</b> ({_format_bytes(current)} / {_format_bytes(total)}) • 🚀 <b>{speed_str}</b></i>",
                             parse_mode="html"
                         )
                     except Exception:
                         pass
 
-            # Download media through MTProto (up to 2GB with NO 20MB limit!)
-            await event.download_media(file=str(dest_path), progress_callback=_progress)
+            # High-speed parallel MTProto download with automatic fallback
+            try:
+                await fast_download_file(
+                    client=client,
+                    location=doc,
+                    out=dest_path,
+                    file_size=file_size,
+                    progress_callback=_progress
+                )
+            except Exception as fast_err:
+                logger.warning(f"FastTelethon download error: {fast_err}, falling back to standard download...", exc_info=True)
+                if dest_path.exists():
+                    try:
+                        dest_path.unlink()
+                    except Exception:
+                        pass
+                await event.download_media(file=str(dest_path), progress_callback=_progress)
 
             actual_size = dest_path.stat().st_size if dest_path.exists() else file_size
 
@@ -302,20 +353,20 @@ def setup_telethon_bot(client: TelegramClient) -> None:
 
             # Upload clean file (Telethon supports sending files up to 2GB!)
             if has_clean:
-                await client.send_file(
+                await send_file_fast(
+                    client,
                     chat_id,
-                    file=str(report.clean_file_path),
-                    caption=f"✅ <b>Cleaned ULP File</b> ({report.valid_lines:,} lines, {report.human_clean_size})",
-                    parse_mode="html"
+                    file_path=report.clean_file_path,
+                    caption=f"✅ <b>Cleaned ULP File</b> ({report.valid_lines:,} lines, {report.human_clean_size})"
                 )
 
             # Upload errors log if errors occurred
             if has_errors:
-                await client.send_file(
+                await send_file_fast(
+                    client,
                     chat_id,
-                    file=str(report.error_file_path),
-                    caption=f"⚠️ <b>Errors Log</b> ({report.error_lines:,} invalid lines, {report.human_error_size})",
-                    parse_mode="html"
+                    file_path=report.error_file_path,
+                    caption=f"⚠️ <b>Errors Log</b> ({report.error_lines:,} invalid lines, {report.human_error_size})"
                 )
 
         except Exception as e:
@@ -413,11 +464,11 @@ def setup_telethon_bot(client: TelegramClient) -> None:
             await event.answer("Clean file not available.", alert=True)
             return
         await event.answer("Sending clean file...")
-        await client.send_file(
+        await send_file_fast(
+            client,
             chat_id,
-            file=str(report.clean_file_path),
-            caption=f"✅ <b>Cleaned ULP File</b> ({report.valid_lines:,} lines, {report.human_clean_size})",
-            parse_mode="html"
+            file_path=report.clean_file_path,
+            caption=f"✅ <b>Cleaned ULP File</b> ({report.valid_lines:,} lines, {report.human_clean_size})"
         )
 
     @client.on(events.CallbackQuery(data=b"download_errors"))
@@ -428,9 +479,9 @@ def setup_telethon_bot(client: TelegramClient) -> None:
             await event.answer("Errors file not available.", alert=True)
             return
         await event.answer("Sending errors file...")
-        await client.send_file(
+        await send_file_fast(
+            client,
             chat_id,
-            file=str(report.error_file_path),
-            caption=f"⚠️ <b>Errors Log</b> ({report.error_lines:,} invalid lines, {report.human_error_size})",
-            parse_mode="html"
+            file_path=report.error_file_path,
+            caption=f"⚠️ <b>Errors Log</b> ({report.error_lines:,} invalid lines, {report.human_error_size})"
         )
